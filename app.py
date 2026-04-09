@@ -17,7 +17,7 @@ NIKKEI_LABEL = "日経平均先物"
 
 SYMBOLS: dict[str, dict[str, float | int | str | list[tuple[int, int, float]]]] = {
     "7011.T": {
-        "label": "7011.T 三菱重工",
+        "label": "7011.M 二菱重工",
         "start_price": 2428,
         "beta": 0.86,
         "correlation": 0.82,
@@ -34,7 +34,7 @@ SYMBOLS: dict[str, dict[str, float | int | str | list[tuple[int, int, float]]]] 
         "shocks": [(520, 45, 0.00016), (1680, 95, -0.00013), (3180, 60, 0.00018)],
     },
     "5803.T": {
-        "label": "5803.T フジクラ",
+        "label": "5803.M プジクラ",
         "start_price": 2865,
         "beta": 1.02,
         "correlation": 0.78,
@@ -51,7 +51,7 @@ SYMBOLS: dict[str, dict[str, float | int | str | list[tuple[int, int, float]]]] 
         "shocks": [(860, 55, 0.0002), (2410, 75, -0.00018), (3890, 90, 0.00015)],
     },
     "8035.T": {
-        "label": "8035.T 東京エレクトロン",
+        "label": "8035.M 東京エレクトーン",
         "start_price": 31800,
         "beta": 1.15,
         "correlation": 0.74,
@@ -68,7 +68,7 @@ SYMBOLS: dict[str, dict[str, float | int | str | list[tuple[int, int, float]]]] 
         "shocks": [(640, 50, 0.00022), (2140, 80, -0.00016), (3540, 70, 0.00021)],
     },
     "9984.T": {
-        "label": "9984.T ソフトバンクG",
+        "label": "9984.M ソフトパンクG",
         "start_price": 8250,
         "beta": 0.93,
         "correlation": 0.8,
