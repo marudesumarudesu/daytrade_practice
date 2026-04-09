@@ -386,7 +386,71 @@ def unrealized_pnl(position: dict[str, float | int], last_price: int) -> float:
     return 0.0
 
 
-def apply_fill(symbol: str, side: str, qty: int, price: int, step: int, source: str) -> str:
+def order_action_label(action: str) -> str:
+    labels = {
+        "OPEN_BUY": "新規買い",
+        "OPEN_SELL": "新規売り",
+        "CLOSE_BUY": "返済買い",
+        "CLOSE_SELL": "返済売り",
+    }
+    return labels[action]
+
+
+def order_side_for_action(action: str) -> str:
+    return "BUY" if action in {"OPEN_BUY", "CLOSE_BUY"} else "SELL"
+
+
+def order_action_from_record(order: dict[str, str | int]) -> str:
+    action = order.get("action")
+    if isinstance(action, str) and action:
+        return action
+    return "OPEN_BUY" if order.get("side") == "BUY" else "OPEN_SELL"
+
+
+def validate_order_action(symbol: str, action: str, qty: int) -> tuple[bool, str]:
+    position_qty = int(st.session_state.positions[symbol]["qty"])
+    label = SYMBOLS[symbol]["label"]
+
+    if qty <= 0:
+        return False, "株数は1以上で指定してください"
+
+    if action == "OPEN_BUY":
+        if position_qty < 0:
+            return False, f"{label} は売り建玉があるため新規買いできません"
+        return True, ""
+    if action == "OPEN_SELL":
+        if position_qty > 0:
+            return False, f"{label} は買い建玉があるため新規売りできません"
+        return True, ""
+    if action == "CLOSE_BUY":
+        if position_qty >= 0:
+            return False, f"{label} は返済買いできる売り建玉がありません"
+        if qty > abs(position_qty):
+            return False, f"{label} の返済買い数量は売り建玉 {abs(position_qty):,} 株以下で指定してください"
+        return True, ""
+    if action == "CLOSE_SELL":
+        if position_qty <= 0:
+            return False, f"{label} は返済売りできる買い建玉がありません"
+        if qty > position_qty:
+            return False, f"{label} の返済売り数量は買い建玉 {position_qty:,} 株以下で指定してください"
+        return True, ""
+    return False, "未対応の注文アクションです"
+
+
+def session_pnl(step: int) -> dict[str, float]:
+    total_realized = sum(float(position["realized"]) for position in st.session_state.positions.values())
+    total_unrealized = 0.0
+    for symbol, position in st.session_state.positions.items():
+        last_price = int(st.session_state.market["symbols"][symbol].iloc[step]["last"])
+        total_unrealized += unrealized_pnl(position, last_price)
+    return {
+        "realized": total_realized,
+        "unrealized": total_unrealized,
+        "total": total_realized + total_unrealized,
+    }
+
+
+def apply_fill(symbol: str, side: str, qty: int, price: int, step: int, source: str, action: str | None = None) -> str:
     position = st.session_state.positions[symbol]
     current_qty = int(position["qty"])
     avg_price = float(position["avg_price"])
@@ -420,30 +484,39 @@ def apply_fill(symbol: str, side: str, qty: int, price: int, step: int, source: 
         "qty": qty,
         "price": price,
         "source": source,
+        "action": action,
         "timestamp": SESSION_START + timedelta(seconds=step),
     }
     st.session_state.fills.insert(0, fill_record)
-    side_label = "買い" if side == "BUY" else "売り"
+    action_label = order_action_label(action) if action else ("買い" if side == "BUY" else "売り")
     source_label = "成行" if source == "MARKET" else "指値"
-    return f"{SYMBOLS[symbol]['label']} {side_label} {qty:,}株 @{format_price(price)} ({source_label})"
+    return f"{SYMBOLS[symbol]['label']} {action_label} {qty:,}株 @{format_price(price)} ({source_label})"
 
 
-def execute_market_order(symbol: str, side: str, qty: int, step: int) -> str:
+def execute_market_order(symbol: str, action: str, qty: int, step: int) -> str:
+    is_valid, message = validate_order_action(symbol, action, qty)
+    if not is_valid:
+        return message
     snapshot = st.session_state.market["symbols"][symbol].iloc[step]
+    side = order_side_for_action(action)
     fill_price = int(snapshot["best_ask"] if side == "BUY" else snapshot["best_bid"])
-    return apply_fill(symbol, side, qty, fill_price, step, "MARKET")
+    return apply_fill(symbol, side, qty, fill_price, step, "MARKET", action)
 
 
-def submit_limit_order(symbol: str, side: str, qty: int, limit_price: int, step: int) -> str:
+def submit_limit_order(symbol: str, action: str, qty: int, limit_price: int, step: int) -> str:
+    is_valid, message = validate_order_action(symbol, action, qty)
+    if not is_valid:
+        return message
     snapshot = st.session_state.market["symbols"][symbol].iloc[step]
     limit_price = round_to_tick(limit_price, int(snapshot["tick"]))
+    side = order_side_for_action(action)
 
     immediately_fillable = (side == "BUY" and limit_price >= int(snapshot["best_ask"])) or (
         side == "SELL" and limit_price <= int(snapshot["best_bid"])
     )
     if immediately_fillable:
         fill_price = int(snapshot["best_ask"] if side == "BUY" else snapshot["best_bid"])
-        return apply_fill(symbol, side, qty, fill_price, step, "LIMIT")
+        return apply_fill(symbol, side, qty, fill_price, step, "LIMIT", action)
 
     order_id = f"ORD-{st.session_state.order_seq:04d}"
     st.session_state.order_seq += 1
@@ -451,14 +524,14 @@ def submit_limit_order(symbol: str, side: str, qty: int, limit_price: int, step:
         {
             "id": order_id,
             "symbol": symbol,
+            "action": action,
             "side": side,
             "qty": qty,
             "limit_price": limit_price,
             "created_step": step,
         }
     )
-    side_label = "買い" if side == "BUY" else "売り"
-    return f"{SYMBOLS[symbol]['label']} {side_label}指値 {qty:,}株 @{format_price(limit_price)} を受付"
+    return f"{SYMBOLS[symbol]['label']} {order_action_label(action)}指値 {qty:,}株 @{format_price(limit_price)} を受付"
 
 
 def process_limit_orders_until(step: int) -> None:
@@ -466,7 +539,7 @@ def process_limit_orders_until(step: int) -> None:
     if step <= last_processed:
         return
 
-    fill_messages: list[str] = []
+    notices: list[str] = []
     open_orders = st.session_state.orders
     market = st.session_state.market["symbols"]
 
@@ -477,27 +550,36 @@ def process_limit_orders_until(step: int) -> None:
                 still_open.append(order)
                 continue
 
-            snapshot = market[str(order["symbol"])].iloc[current]
+            symbol = str(order["symbol"])
+            action = order_action_from_record(order)
+            is_valid, message = validate_order_action(symbol, action, int(order["qty"]))
+            if not is_valid:
+                notices.append(f"{order_action_label(action)}注文を取消: {message}")
+                continue
+
+            snapshot = market[symbol].iloc[current]
             if order["side"] == "BUY" and int(order["limit_price"]) >= int(snapshot["best_ask"]):
-                fill_messages.append(
+                notices.append(
                     apply_fill(
-                        str(order["symbol"]),
+                        symbol,
                         "BUY",
                         int(order["qty"]),
                         int(snapshot["best_ask"]),
                         current,
                         "LIMIT",
+                        action,
                     )
                 )
             elif order["side"] == "SELL" and int(order["limit_price"]) <= int(snapshot["best_bid"]):
-                fill_messages.append(
+                notices.append(
                     apply_fill(
-                        str(order["symbol"]),
+                        symbol,
                         "SELL",
                         int(order["qty"]),
                         int(snapshot["best_bid"]),
                         current,
                         "LIMIT",
+                        action,
                     )
                 )
             else:
@@ -506,8 +588,8 @@ def process_limit_orders_until(step: int) -> None:
 
     st.session_state.orders = open_orders
     st.session_state.last_processed_step = step
-    if fill_messages:
-        st.session_state.notice = fill_messages[-1]
+    if notices:
+        st.session_state.notice = notices[-1]
 
 
 def cancel_symbol_orders(symbol: str) -> str:
@@ -631,16 +713,13 @@ def render_tape_html(trades: pd.DataFrame) -> str:
     rows: list[str] = []
     recent = trades.sort_values("step", ascending=False).head(18)
     for row in recent.itertuples():
-        side_badge = "買" if row.side == "BUY" else "売"
-        row_class = "buy-row" if row.side == "BUY" else "sell-row"
         rows.append(
             html_fragment(
                 f"""
-                <tr class="{row_class}">
+                <tr>
                     <td>{row.timestamp.strftime('%H:%M:%S')}</td>
                     <td>{format_price(row.last)}</td>
                     <td>{format_price(row.size)}</td>
-                    <td>{side_badge}</td>
                 </tr>
                 """
             )
@@ -655,7 +734,6 @@ def render_tape_html(trades: pd.DataFrame) -> str:
                         <th>時刻</th>
                         <th>約定値</th>
                         <th>株数</th>
-                        <th>売買</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -679,12 +757,11 @@ def render_orders_html(orders: list[dict[str, str | int]]) -> str:
 
     rows: list[str] = []
     for order in orders[:4]:
-        side_label = "買い" if order["side"] == "BUY" else "売り"
         rows.append(
             html_fragment(
                 f"""
                 <tr>
-                    <td>{side_label}</td>
+                    <td>{order_action_label(order_action_from_record(order))}</td>
                     <td>{format_price(order["qty"])}</td>
                     <td>{format_price(order["limit_price"])}</td>
                 </tr>
@@ -697,7 +774,7 @@ def render_orders_html(orders: list[dict[str, str | int]]) -> str:
             <table class="mini-table">
                 <thead>
                     <tr>
-                        <th>側</th>
+                        <th>注文</th>
                         <th>株数</th>
                         <th>指値</th>
                     </tr>
@@ -716,6 +793,7 @@ def render_status_html(
     snapshot: pd.Series,
     position: dict[str, float | int],
     open_orders: list[dict[str, str | int]],
+    pnl_summary: dict[str, float],
 ) -> str:
     qty = int(position["qty"])
     avg_price = float(position["avg_price"])
@@ -725,12 +803,14 @@ def render_status_html(
     direction = position_label(qty)
     last_fill = next((fill for fill in st.session_state.fills if fill["symbol"] == symbol), None)
     last_fill_text = (
-        f"{'買い' if last_fill['side'] == 'BUY' else '売り'} {format_price(last_fill['qty'])}株 @ {format_price(last_fill['price'])}"
+        f"{order_action_label(str(last_fill['action'])) if last_fill.get('action') else ('買い' if last_fill['side'] == 'BUY' else '売り')} "
+        f"{format_price(last_fill['qty'])}株 @ {format_price(last_fill['price'])}"
         if last_fill
         else "未約定"
     )
 
     cards = [
+        ("通算損益", format_signed(pnl_summary["total"]), f"実現 {format_signed(pnl_summary['realized'])} / 含み {format_signed(pnl_summary['unrealized'])}"),
         ("現在値", format_price(snapshot["last"]), f"VWAP差 {format_signed(vwap_gap)}"),
         ("VWAP", format_price(snapshot["vwap"]), f"最良売 {format_price(snapshot['best_ask'])}"),
         ("保有株数", f"{abs(qty):,}株", direction),
@@ -869,21 +949,30 @@ def inject_css() -> None:
         [data-testid="stSegmentedControl"] button {
             border-radius: 14px;
             color: #D6E1FA !important;
-            background: rgba(11, 19, 34, 0.88) !important;
+            background: linear-gradient(180deg, rgba(18, 28, 48, 0.98), rgba(9, 16, 31, 0.98)) !important;
+            border: 1px solid rgba(95, 120, 168, 0.22) !important;
+            -webkit-text-fill-color: #D6E1FA !important;
         }
 
-        [data-testid="stSegmentedControl"] button [data-testid="stMarkdownContainer"] p {
+        [data-testid="stSegmentedControl"] button * {
             color: #D6E1FA !important;
+            -webkit-text-fill-color: #D6E1FA !important;
+        }
+
+        [data-testid="stSegmentedControl"] button:not([aria-pressed="true"]) {
+            background: linear-gradient(180deg, rgba(18, 28, 48, 0.98), rgba(9, 16, 31, 0.98)) !important;
         }
 
         [data-testid="stSegmentedControl"] button[aria-pressed="true"] {
             background: linear-gradient(180deg, rgba(47, 85, 146, 0.95), rgba(20, 43, 80, 0.98)) !important;
             border: 1px solid rgba(143, 176, 232, 0.4) !important;
             color: #F8FBFF !important;
+            -webkit-text-fill-color: #F8FBFF !important;
         }
 
-        [data-testid="stSegmentedControl"] button[aria-pressed="true"] [data-testid="stMarkdownContainer"] p {
+        [data-testid="stSegmentedControl"] button[aria-pressed="true"] * {
             color: #F8FBFF !important;
+            -webkit-text-fill-color: #F8FBFF !important;
         }
 
         [data-testid="stButton"] button {
@@ -1290,7 +1379,7 @@ def render_live_terminal() -> None:
             board = build_board_snapshot(symbol_snapshot, SYMBOLS[selected_symbol])
             st.markdown(render_board_html(board), unsafe_allow_html=True)
         with st.container(border=True):
-            st.markdown(panel_header("注文画面", "成行 / 指値 / 待機中注文の取消"), unsafe_allow_html=True)
+            st.markdown(panel_header("注文画面", "新規・返済を分けた売買練習"), unsafe_allow_html=True)
             c1, c2, c3 = st.columns(3)
             with c1:
                 qty = st.number_input("株数", min_value=100, step=100, key="order_qty")
@@ -1310,36 +1399,85 @@ def render_live_terminal() -> None:
                 f"最良売気配: {format_price(symbol_snapshot['best_ask'])} / "
                 f"現在値: {format_price(symbol_snapshot['last'])}"
             )
-            b1, b2, b3 = st.columns(3)
+            position_qty = int(st.session_state.positions[selected_symbol]["qty"])
+            close_buy_disabled = position_qty >= 0
+            close_sell_disabled = position_qty <= 0
+            qty_too_large_for_close_buy = position_qty < 0 and int(qty) > abs(position_qty)
+            qty_too_large_for_close_sell = position_qty > 0 and int(qty) > position_qty
+
+            if close_buy_disabled:
+                st.caption("返済買いは売り建玉があるときのみ可能です。")
+            elif qty_too_large_for_close_buy:
+                st.caption(f"返済買いは現在の売り建玉 {abs(position_qty):,} 株までです。")
+
+            if close_sell_disabled:
+                st.caption("返済売りは買い建玉があるときのみ可能です。")
+            elif qty_too_large_for_close_sell:
+                st.caption(f"返済売りは現在の買い建玉 {position_qty:,} 株までです。")
+
+            b1, b2, b3, b4, b5 = st.columns(5)
             with b1:
-                if st.button("買い発注", use_container_width=True):
+                if st.button("新規買い", use_container_width=True, disabled=position_qty < 0):
                     message = (
-                        execute_market_order(selected_symbol, "BUY", int(qty), step)
+                        execute_market_order(selected_symbol, "OPEN_BUY", int(qty), step)
                         if order_type == "成行"
-                        else submit_limit_order(selected_symbol, "BUY", int(qty), int(st.session_state.limit_price), step)
+                        else submit_limit_order(selected_symbol, "OPEN_BUY", int(qty), int(st.session_state.limit_price), step)
                     )
                     st.session_state.notice = message
                     st.rerun()
             with b2:
-                if st.button("売り発注", use_container_width=True):
+                if st.button("新規売り", use_container_width=True, disabled=position_qty > 0):
                     message = (
-                        execute_market_order(selected_symbol, "SELL", int(qty), step)
+                        execute_market_order(selected_symbol, "OPEN_SELL", int(qty), step)
                         if order_type == "成行"
-                        else submit_limit_order(selected_symbol, "SELL", int(qty), int(st.session_state.limit_price), step)
+                        else submit_limit_order(selected_symbol, "OPEN_SELL", int(qty), int(st.session_state.limit_price), step)
                     )
                     st.session_state.notice = message
                     st.rerun()
             with b3:
+                if st.button(
+                    "返済買い",
+                    use_container_width=True,
+                    disabled=close_buy_disabled or qty_too_large_for_close_buy,
+                ):
+                    message = (
+                        execute_market_order(selected_symbol, "CLOSE_BUY", int(qty), step)
+                        if order_type == "成行"
+                        else submit_limit_order(selected_symbol, "CLOSE_BUY", int(qty), int(st.session_state.limit_price), step)
+                    )
+                    st.session_state.notice = message
+                    st.rerun()
+            with b4:
+                if st.button(
+                    "返済売り",
+                    use_container_width=True,
+                    disabled=close_sell_disabled or qty_too_large_for_close_sell,
+                ):
+                    message = (
+                        execute_market_order(selected_symbol, "CLOSE_SELL", int(qty), step)
+                        if order_type == "成行"
+                        else submit_limit_order(selected_symbol, "CLOSE_SELL", int(qty), int(st.session_state.limit_price), step)
+                    )
+                    st.session_state.notice = message
+                    st.rerun()
+            with b5:
                 if st.button("注文取消", use_container_width=True):
                     st.session_state.notice = cancel_symbol_orders(selected_symbol)
                     st.rerun()
 
     with right_col:
         symbol_orders = [order for order in st.session_state.orders if order["symbol"] == selected_symbol]
+        pnl_summary = session_pnl(step)
         with st.container(border=True):
             st.markdown(panel_header("VWAP / 保有状況", "選択銘柄の約定と建玉"), unsafe_allow_html=True)
             st.markdown(
-                render_status_html(selected_symbol, symbol_snapshot, st.session_state.positions[selected_symbol], symbol_orders),
+                render_status_html(
+                    selected_symbol,
+                    symbol_snapshot,
+                    st.session_state.positions[selected_symbol],
+                    symbol_orders,
+                    pnl_summary,
+                ),
                 unsafe_allow_html=True,
             )
 
