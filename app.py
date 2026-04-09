@@ -330,8 +330,6 @@ def ensure_state() -> None:
         st.session_state.selected_symbol = next(iter(SYMBOLS))
     if "order_qty" not in st.session_state:
         st.session_state.order_qty = 100
-    if "order_type" not in st.session_state:
-        st.session_state.order_type = "成行"
     if "limit_price" not in st.session_state:
         st.session_state.limit_price = int(SYMBOLS[st.session_state.selected_symbol]["start_price"])
     if "order_symbol_bound" not in st.session_state:
@@ -532,6 +530,12 @@ def submit_limit_order(symbol: str, action: str, qty: int, limit_price: int, ste
         }
     )
     return f"{SYMBOLS[symbol]['label']} {order_action_label(action)}指値 {qty:,}株 @{format_price(limit_price)} を受付"
+
+
+def place_order(symbol: str, action: str, qty: int, step: int, execution_mode: str, limit_price: int) -> str:
+    if execution_mode == "MARKET":
+        return execute_market_order(symbol, action, qty, step)
+    return submit_limit_order(symbol, action, qty, limit_price, step)
 
 
 def process_limit_orders_until(step: int) -> None:
@@ -1384,14 +1388,24 @@ def render_live_terminal() -> None:
             with c1:
                 qty = st.number_input("株数", min_value=100, step=100, key="order_qty")
             with c2:
-                order_type = st.selectbox("注文種別", ["成行", "指値"], key="order_type")
-            with c3:
                 st.number_input(
-                    "指値",
+                    "指値価格",
                     min_value=int(symbol_snapshot["tick"]),
                     step=int(symbol_snapshot["tick"]),
                     key="limit_price",
-                    disabled=order_type == "成行",
+                )
+            with c3:
+                st.markdown(
+                    html_fragment(
+                        f"""
+                        <div class="status-banner">
+                            <strong>執行ルール</strong><br>
+                            成行は現在の気配で即時約定。<br>
+                            指値は {format_price(st.session_state.limit_price)} に注文を置きます。
+                        </div>
+                        """
+                    ),
+                    unsafe_allow_html=True,
                 )
 
             st.caption(
@@ -1415,52 +1429,126 @@ def render_live_terminal() -> None:
             elif qty_too_large_for_close_sell:
                 st.caption(f"返済売りは現在の買い建玉 {position_qty:,} 株までです。")
 
-            b1, b2, b3, b4, b5 = st.columns(5)
-            with b1:
-                if st.button("新規買い", use_container_width=True, disabled=position_qty < 0):
-                    message = (
-                        execute_market_order(selected_symbol, "OPEN_BUY", int(qty), step)
-                        if order_type == "成行"
-                        else submit_limit_order(selected_symbol, "OPEN_BUY", int(qty), int(st.session_state.limit_price), step)
+            st.caption("成行注文")
+            market_b1, market_b2, market_b3, market_b4 = st.columns(4)
+            with market_b1:
+                if st.button("成行 新規買い", use_container_width=True, disabled=position_qty < 0):
+                    message = place_order(
+                        selected_symbol,
+                        "OPEN_BUY",
+                        int(qty),
+                        step,
+                        "MARKET",
+                        int(st.session_state.limit_price),
                     )
                     st.session_state.notice = message
                     st.rerun()
-            with b2:
-                if st.button("新規売り", use_container_width=True, disabled=position_qty > 0):
-                    message = (
-                        execute_market_order(selected_symbol, "OPEN_SELL", int(qty), step)
-                        if order_type == "成行"
-                        else submit_limit_order(selected_symbol, "OPEN_SELL", int(qty), int(st.session_state.limit_price), step)
+            with market_b2:
+                if st.button("成行 新規売り", use_container_width=True, disabled=position_qty > 0):
+                    message = place_order(
+                        selected_symbol,
+                        "OPEN_SELL",
+                        int(qty),
+                        step,
+                        "MARKET",
+                        int(st.session_state.limit_price),
                     )
                     st.session_state.notice = message
                     st.rerun()
-            with b3:
+            with market_b3:
                 if st.button(
-                    "返済買い",
+                    "成行 返済買い",
                     use_container_width=True,
                     disabled=close_buy_disabled or qty_too_large_for_close_buy,
                 ):
-                    message = (
-                        execute_market_order(selected_symbol, "CLOSE_BUY", int(qty), step)
-                        if order_type == "成行"
-                        else submit_limit_order(selected_symbol, "CLOSE_BUY", int(qty), int(st.session_state.limit_price), step)
+                    message = place_order(
+                        selected_symbol,
+                        "CLOSE_BUY",
+                        int(qty),
+                        step,
+                        "MARKET",
+                        int(st.session_state.limit_price),
                     )
                     st.session_state.notice = message
                     st.rerun()
-            with b4:
+            with market_b4:
                 if st.button(
-                    "返済売り",
+                    "成行 返済売り",
                     use_container_width=True,
                     disabled=close_sell_disabled or qty_too_large_for_close_sell,
                 ):
-                    message = (
-                        execute_market_order(selected_symbol, "CLOSE_SELL", int(qty), step)
-                        if order_type == "成行"
-                        else submit_limit_order(selected_symbol, "CLOSE_SELL", int(qty), int(st.session_state.limit_price), step)
+                    message = place_order(
+                        selected_symbol,
+                        "CLOSE_SELL",
+                        int(qty),
+                        step,
+                        "MARKET",
+                        int(st.session_state.limit_price),
                     )
                     st.session_state.notice = message
                     st.rerun()
-            with b5:
+
+            st.caption("指値注文")
+            limit_b1, limit_b2, limit_b3, limit_b4 = st.columns(4)
+            with limit_b1:
+                if st.button("指値 新規買い", use_container_width=True, disabled=position_qty < 0):
+                    message = place_order(
+                        selected_symbol,
+                        "OPEN_BUY",
+                        int(qty),
+                        step,
+                        "LIMIT",
+                        int(st.session_state.limit_price),
+                    )
+                    st.session_state.notice = message
+                    st.rerun()
+            with limit_b2:
+                if st.button("指値 新規売り", use_container_width=True, disabled=position_qty > 0):
+                    message = place_order(
+                        selected_symbol,
+                        "OPEN_SELL",
+                        int(qty),
+                        step,
+                        "LIMIT",
+                        int(st.session_state.limit_price),
+                    )
+                    st.session_state.notice = message
+                    st.rerun()
+            with limit_b3:
+                if st.button(
+                    "指値 返済買い",
+                    use_container_width=True,
+                    disabled=close_buy_disabled or qty_too_large_for_close_buy,
+                ):
+                    message = place_order(
+                        selected_symbol,
+                        "CLOSE_BUY",
+                        int(qty),
+                        step,
+                        "LIMIT",
+                        int(st.session_state.limit_price),
+                    )
+                    st.session_state.notice = message
+                    st.rerun()
+            with limit_b4:
+                if st.button(
+                    "指値 返済売り",
+                    use_container_width=True,
+                    disabled=close_sell_disabled or qty_too_large_for_close_sell,
+                ):
+                    message = place_order(
+                        selected_symbol,
+                        "CLOSE_SELL",
+                        int(qty),
+                        step,
+                        "LIMIT",
+                        int(st.session_state.limit_price),
+                    )
+                    st.session_state.notice = message
+                    st.rerun()
+
+            cancel_col = st.columns([3, 1])[1]
+            with cancel_col:
                 if st.button("注文取消", use_container_width=True):
                     st.session_state.notice = cancel_symbol_orders(selected_symbol)
                     st.rerun()
